@@ -16,10 +16,10 @@ sub option_config {
         revisions
         stats
         graph
+        setVariables
+        setAllRequired
     );
 }
-
-my $LENGTH_LIMIT = 5000;
 
 sub process {
     my $self    = shift;
@@ -58,7 +58,11 @@ sub process {
         #        }
 
         if ( $self->option('check') ) {
-            $self->check( $session, $asset );
+            $self->check( $session, $asset, $self->option('fix') );
+        }
+        
+        if ( $self->option('fix') ) {
+            $self->check( $session, $asset, 1 );
         }
 
         if ( $self->option('branching') ) {
@@ -76,12 +80,83 @@ sub process {
         if ( $self->option('graph') ) {
             $self->graph( $session, $asset );
         }
+        
+        if ( $self->option('setVariables') ) {
+            $self->set_variables( $session, $asset );
+        }
+        
+        if ( $self->option('setAllRequired') ) {
+            $self->set_all_required( $session, $asset );
+        }
+        
     }
     return 1;
 }
 
-sub check {
+=head2
+
+Set Section and Question variables from title text
+
+=cut
+
+sub set_variables {
     my ( $self, $session, $survey ) = @_;
+
+    my $sNum = 0;
+    foreach my $s ( @{ $survey->surveyJSON->sections } ) {
+        $sNum++;
+        if (!$s->{variable}) {
+            my $new_var = $s->{title} !~ m/^S_/ ? "S_$s->{title}" : $s->{title};
+            print  "$sNum -> $new_var\n";
+            $s->{variable} = $new_var;
+        }
+        my $qNum;
+        foreach my $q ( @{ $s->{questions} } ) {
+            $qNum++;
+            if (!$q->{variable}) {
+                my $new_var = $q->{title};
+                print  "$sNum-$qNum -> $new_var\n";
+                $q->{variable} = $new_var;
+            }
+        }
+    }
+    $survey->persistSurveyJSON;
+}
+
+=head2
+
+Sets the required flag to 1 on all questions 
+
+=cut
+
+sub set_all_required {
+    my ( $self, $session, $survey ) = @_;
+
+    my $sNum = 0;
+    foreach my $s ( @{ $survey->surveyJSON->sections } ) {
+        $sNum++;
+        my $qNum;
+        foreach my $q ( @{ $s->{questions} } ) {
+            $qNum++;
+            if (!$q->{required}) {
+                print  "Setting required flag on $sNum-$qNum\n";
+                $q->{required} = 1;
+            }
+        }
+    }
+    $survey->persistSurveyJSON;
+}
+
+=head2 check
+
+Check for corruption
+
+=cut
+
+sub check {
+    my ( $self, $session, $survey, $fix ) = @_;
+    
+    my $LENGTH_LIMIT = 5000;
 
     my $dirty;
     foreach my $s ( @{ $survey->surveyJSON->sections } ) {
@@ -116,22 +191,21 @@ sub check {
         }
     }
 
-    #    $survey->persistSurveyJSON() if $dirty;
-
-    #            print(Dumper(
-    #                    {   survey   => $survey->survey->{survey},
-    #                        sections => $survey->survey->{sections},
-    #                    }
-    #                )
-    #            );
+    if ($fix) {
+        $survey->persistSurveyJSON() if $dirty;
+    }
 }
+
+=head2 dump
+
+Dump survey structure
+
+=cut
 
 sub dump {
     my ( $self, $session, $survey ) = @_;
 
     print <<END_TEXT;
-# Each line of this document is used to generate a unit test of the ePASS
-# branching logic.
 #
 # The format for each line is:
 # <Question> <Answer> <Expect>
@@ -171,6 +245,12 @@ END_TEXT
         }
     }
 }
+
+=head2 stats
+
+Show survey stats
+
+=cut
 
 sub stats {
     my ( $self, $session, $survey ) = @_;
@@ -268,6 +348,12 @@ Non-required Questions:
 END_REPORT
 }
 
+=head2 branching
+
+Dumps brief outline of survey branching
+
+=cut
+
 sub branching {
     my ( $self, $session, $survey ) = @_;
 
@@ -304,15 +390,9 @@ sub branching {
 
 #-------------------------------------------------------------------
 
-=head2 generateGraph ( )
+=head2 graph ( )
 
-Generates the Flux Graph using GraphViz. This is currently just a proof-of-concept.
-The image is stored at /uploads/FluxGraph.png and overwritten every time this method is called.
-
-Currently only simple GraphViz features are used to generate the graph. Later we will
-probably take advantage of html-like processing capabilities to improve the output.
-
-GraphViz must be installed for this to work.
+Generates a graph visualisation to survey.svg using GraphViz.
 
 =cut
 
@@ -322,24 +402,76 @@ sub graph {
     use GraphViz;
     use Readonly;
 
-    Readonly my $PATH => 'survey.png';
+    Readonly my $OUTPUT_FILE => 'survey';
+    Readonly my $OUTPUT_TYPE => 'svg';
     Readonly my $FONTSIZE => 10;
-    
+
+    Readonly my %COLOR => (
+        bg                   => 'white',
+        start                => 'CornflowerBlue',
+        start_fill           => 'Green',
+        section              => 'CornflowerBlue',
+        section_fill         => 'LightYellow',
+        question             => 'CornflowerBlue',
+        question_fill        => 'LightBlue',
+        start_edge           => 'Green',
+        fall_through_edge    => 'CornflowerBlue',
+        goto_edge            => 'DarkOrange',
+        goto_expression_edge => 'DarkViolet',
+    );
+
     # Create the GraphViz object used to generate the image
-    my $g = GraphViz->new( bgcolor => 'white', fontsize => $FONTSIZE, layout => 'neato');
-    
+    # N.B. dot gives vertical layout, neato gives purdy circular
+    my $g = GraphViz->new( bgcolor => $COLOR{bg}, fontsize => $FONTSIZE, layout => 'dot', overlap => 'orthoyx');
+
     $g->add_node(
         'Start',
         label     => 'Start',
         fontsize  => $FONTSIZE,
         shape     => 'ellipse',
         style     => 'filled',
-        color     => 'CornflowerBlue',
-        fillcolor => 'Green',
+        color     => $COLOR{start},
+        fillcolor => $COLOR{start_fill},
     );
-    
+
     my $very_first = 1;
-    
+
+    my $add_goto_edge = sub {
+        my ( $obj, $id, $taillabel ) = @_;
+        return unless $obj;
+
+        if ( my $goto = $obj->{goto} ) {
+            $g->add_edge(
+                $id => $goto,
+                taillabel => $taillabel || 'Jump To',
+                labelfontcolor => $COLOR{goto_edge},
+                labelfontsize  => $FONTSIZE,
+                color          => $COLOR{goto_edge},
+            );
+        }
+    };
+
+    require WebGUI::Asset::Wobject::Survey::ResponseJSON;
+    my $add_goto_expression_edges = sub {
+        my ( $obj, $id, $taillabel ) = @_;
+        return unless $obj;
+        return unless $obj->{gotoExpression};
+
+        my $rj = 'WebGUI::Asset::Wobject::Survey::ResponseJSON';
+
+        for my $gotoExpression ( split /\n/, $obj->{gotoExpression} ) {
+            if ( my $processed = $rj->parseGotoExpression( $session, $gotoExpression ) ) {
+                $g->add_edge(
+                    $id            => $processed->{target},
+                    taillabel      => $taillabel ? "$taillabel: $processed->{expression}" :  $processed->{expression},
+                    labelfontcolor => $COLOR{goto_expression_edge},
+                    labelfontsize  => $FONTSIZE,
+                    color          => $COLOR{goto_expression_edge},
+                );
+            }
+        }
+    };
+
     my @fall_through;
     my $sNum = 0;
     foreach my $s ( @{ $survey->surveyJSON->sections } ) {
@@ -348,37 +480,41 @@ sub graph {
         my $s_id = $s->{variable} || "S$sNum";
         $g->add_node(
             $s_id,
-            label     => $s_id,
+            label     => "$s_id\n($s->{questionsPerPage} questions per page)",
             fontsize  => $FONTSIZE,
             shape     => 'ellipse',
             style     => 'filled',
-            color     => 'CornflowerBlue',
-            fillcolor => 'LightYellow',
+            color     => $COLOR{section},
+            fillcolor => $COLOR{section_fill},
         );
-        
+
         # See if this is the very first node
         if ($very_first) {
-            $g->add_edge( 
-                'Start' => $s_id,
+            $g->add_edge(
+                'Start'        => $s_id,
                 taillabel      => 'Begin e-PASS',
-                labelfontcolor => 'CornflowerBlue',
+                labelfontcolor => $COLOR{start_edge},
                 labelfontsize  => $FONTSIZE,
-                color          => 'CornflowerBlue'
+                color          => $COLOR{start_edge},
             );
             $very_first = 0;
         }
-        
-        # See if there are any fall_throughs waiting 
+
+        # See if there are any fall_throughs waiting
         # if so, "next" == this section
-        while (my $f = pop @fall_through) {
-            $g->add_edge( 
-                $f->{from} => $s_id,
+        while ( my $f = pop @fall_through ) {
+            $g->add_edge(
+                $f->{from}     => $s_id,
                 taillabel      => $f->{taillabel},
-                labelfontcolor => 'CornflowerBlue',
+                labelfontcolor => $COLOR{fall_through_edge},
                 labelfontsize  => $FONTSIZE,
-                color          => 'CornflowerBlue'
+                color          => $COLOR{fall_through_edge},
             );
         }
+
+        # Add section-level goto and gotoExpression edges
+        $add_goto_edge->( $s, $s_id );
+        $add_goto_expression_edges->( $s, $s_id );
 
         my $qNum = 0;
         foreach my $q ( @{ $s->{questions} } ) {
@@ -394,25 +530,29 @@ sub graph {
             # Add Question node
             $g->add_node(
                 $q_id,
-                label     => $q_id,
+                label     => $q->{required} ? "$q_id *" : $q_id,
                 fontsize  => $FONTSIZE,
                 shape     => 'ellipse',
                 style     => 'filled',
-                color     => 'CornflowerBlue',
-                fillcolor => 'LightBlue',
+                color     => $COLOR{question},
+                fillcolor => $COLOR{question_fill},
             );
-            
-            # See if there are any fall_throughs waiting 
+
+            # See if there are any fall_throughs waiting
             # if so, "next" == this question
-            while (my $f = pop @fall_through) {
-                $g->add_edge( 
-                    $f->{from} => $q_id,
+            while ( my $f = pop @fall_through ) {
+                $g->add_edge(
+                    $f->{from}     => $q_id,
                     taillabel      => $f->{taillabel},
-                    labelfontcolor => 'CornflowerBlue',
+                    labelfontcolor => $COLOR{fall_through_edge},
                     labelfontsize  => $FONTSIZE,
-                    color          => 'CornflowerBlue'
+                    color          => $COLOR{fall_through_edge},
                 );
             }
+
+            # Add question-level goto and gotoExpression edges
+            $add_goto_edge->( $q, $q_id );
+            $add_goto_expression_edges->( $q, $q_id );
 
             my $aNum = 0;
             foreach my $a ( @{ $q->{answers} } ) {
@@ -420,17 +560,9 @@ sub graph {
 
                 my $a_id = $a->{text} || "S$sNum-Q$qNum-A$aNum";
 
-                if ( my $goto = $a->{goto} ) {
-
-                    # Link this question to goto target with Answer as taillabel
-                    # N.B. goto target could be Section or Question
-                    $g->add_edge(
-                        $q_id          => $goto,
-                        taillabel      => $a_id,
-                        labelfontcolor => 'CornflowerBlue',
-                        labelfontsize  => $FONTSIZE,
-                        color          => 'CornflowerBlue'
-                    );
+                $add_goto_expression_edges->( $a, $q_id, $a_id );
+                if ( $a->{goto} ) {
+                    $add_goto_edge->( $a, $q_id, $a_id );
                 }
                 else {
 
@@ -446,9 +578,8 @@ sub graph {
     }
 
     # Render the image to a file
-    $g->as_png($PATH);
-
-    return $PATH;
+    my $method = "as_$OUTPUT_TYPE";
+    $g->$method("$OUTPUT_FILE.$OUTPUT_TYPE");
 }
 
 1;
@@ -461,22 +592,39 @@ WGDev::Command::Survey - Manipulate Survey instances
 
 =head1 SYNOPSIS
 
-    wgd survey 
+    wgd survey [--check] [--fix] [--variables] [--dump] [--stats] [--branching] [--graph]
 
 =head1 DESCRIPTION
 
+Various utilities for Survey instances (dump structure, visualise, etc..).
 
 =head1 OPTIONS
 
 =over 8
 
-=item C<--number> C<-n>
+=item C<--check> C<--fix>
 
-Number of GUIDs to generate. Defaults to 1.
+Check for corruption, and optionally try to fix it. 
 
-=item C<--dashes>
+=item C<--variables>
 
-Whether or not to filter GUIDs containing dashes (for easy double-click copy/pasting)
+Set Section and Question variables from title text
+
+=item C<--dump>
+
+Dump Survey structure
+
+=item C<--stats>
+
+Show Survey stats
+
+=item C<--branching>
+
+Dumps brief outline of survey branching
+
+=item C<--graph>
+
+Generates a graph visualisation to survey.svg using GraphViz.
 
 =back
 
