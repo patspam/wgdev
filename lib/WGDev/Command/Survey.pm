@@ -18,6 +18,7 @@ sub option_config {
         graph
         setVariables
         setAllRequired
+        setYesNo
     );
 }
 
@@ -89,11 +90,15 @@ sub process {
             $self->set_all_required( $session, $asset );
         }
         
+        if ( $self->option('setYesNo') ) {
+            $self->set_yes_no( $session, $asset );
+        }
+        
     }
     return 1;
 }
 
-=head2
+=head2 set_variables
 
 Set Section and Question variables from title text
 
@@ -123,7 +128,7 @@ sub set_variables {
     $survey->persistSurveyJSON;
 }
 
-=head2
+=head2 set_all_required
 
 Sets the required flag to 1 on all questions 
 
@@ -141,6 +146,45 @@ sub set_all_required {
             if (!$q->{required}) {
                 print  "Setting required flag on $sNum-$qNum\n";
                 $q->{required} = 1;
+            }
+        }
+    }
+    $survey->persistSurveyJSON;
+}
+
+=head2 set_yes_no
+
+Updates properties on Yes/No questions
+
+=cut
+
+sub set_yes_no {
+    my ( $self, $session, $survey ) = @_;
+
+    my $sNum = 0;
+    foreach my $s ( @{ $survey->surveyJSON->sections } ) {
+        $sNum++;
+        my $qNum;
+        foreach my $q ( @{ $s->{questions} } ) {
+            $qNum++;
+            if ($q->{questionType} eq 'Yes/No') {
+                print  "Updating $sNum-$qNum\n";
+            }
+            my $aNum = 0;
+            foreach my $a ( @{ $q->{answers} } ) {
+                $aNum++;
+
+                if ($a->{text} eq 'Yes') {
+                    print "Updating Yes answer\n";
+                    $a->{recordedAnswer} = 1;
+                    $a->{value} = 1;
+                }
+                
+                if ($a->{text} eq 'No') {
+                    print "Updating No answer\n";
+                    $a->{recordedAnswer} = 0;
+                    $a->{value} = 1;
+                }
             }
         }
     }
@@ -592,7 +636,7 @@ WGDev::Command::Survey - Manipulate Survey instances
 
 =head1 SYNOPSIS
 
-    wgd survey [--check] [--fix] [--variables] [--dump] [--stats] [--branching] [--graph]
+    wgd survey [--check] [--fix] [--variables] [--dump] [--stats] [--branching] [--graph] [--setYesNo]
 
 =head1 DESCRIPTION
 
@@ -625,6 +669,10 @@ Dumps brief outline of survey branching
 =item C<--graph>
 
 Generates a graph visualisation to survey.svg using GraphViz.
+
+=item C<--setYesNo>
+
+Updates YesNo type questions to more sensible defaults.
 
 =back
 
